@@ -63,13 +63,23 @@ layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "http://127.0.0.1:8090/v1/reports"
 
-[node name="ApiKeyLabel" type="Label" parent="Margin/VBox/Settings"]
+[node name="AppIdLabel" type="Label" parent="Margin/VBox/Settings"]
 layout_mode = 2
-text = "API key"
+text = "App ID"
 
-[node name="ApiKey" type="LineEdit" parent="Margin/VBox/Settings"]
+[node name="AppId" type="LineEdit" parent="Margin/VBox/Settings"]
 layout_mode = 2
-secret = true
+size_flags_horizontal = 3
+placeholder_text = "steam-app or product id"
+
+[node name="BuildIdLabel" type="Label" parent="Margin/VBox/Settings"]
+layout_mode = 2
+text = "Build ID"
+
+[node name="BuildId" type="LineEdit" parent="Margin/VBox/Settings"]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "ci or steam build id"
 
 [node name="IncludeLogs" type="CheckBox" parent="Margin/VBox"]
 layout_mode = 2
