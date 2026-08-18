@@ -1,0 +1,96 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+
+[node name="Main" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_main")
+
+[node name="Margin" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="VBox" type="VBoxContainer" parent="Margin"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Title" type="Label" parent="Margin/VBox"]
+layout_mode = 2
+text = "Blazium Crash Reporter"
+theme_override_font_sizes/font_size = 22
+
+[node name="Consent" type="Label" parent="Margin/VBox"]
+layout_mode = 2
+autowrap_mode = 3
+text = "A crash dump was saved on this device. Nothing is uploaded until you confirm."
+
+[node name="PrivacyLink" type="LinkButton" parent="Margin/VBox"]
+layout_mode = 2
+text = "Privacy policy"
+
+[node name="Reports" type="ItemList" parent="Margin/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+custom_minimum_size = Vector2(0, 160)
+
+[node name="Detail" type="TextEdit" parent="Margin/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+editable = false
+wrap_mode = 1
+
+[node name="Settings" type="GridContainer" parent="Margin/VBox"]
+layout_mode = 2
+columns = 2
+
+[node name="EndpointLabel" type="Label" parent="Margin/VBox/Settings"]
+layout_mode = 2
+text = "Endpoint"
+
+[node name="Endpoint" type="LineEdit" parent="Margin/VBox/Settings"]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "http://127.0.0.1:8090/v1/reports"
+
+[node name="ApiKeyLabel" type="Label" parent="Margin/VBox/Settings"]
+layout_mode = 2
+text = "API key"
+
+[node name="ApiKey" type="LineEdit" parent="Margin/VBox/Settings"]
+layout_mode = 2
+secret = true
+
+[node name="IncludeLogs" type="CheckBox" parent="Margin/VBox"]
+layout_mode = 2
+text = "Include log tail"
+button_pressed = true
+
+[node name="Status" type="Label" parent="Margin/VBox"]
+layout_mode = 2
+text = "Ready."
+
+[node name="Buttons" type="HBoxContainer" parent="Margin/VBox"]
+layout_mode = 2
+
+[node name="Send" type="Button" parent="Margin/VBox/Buttons"]
+layout_mode = 2
+text = "Send selected report"
+
+[node name="Discard" type="Button" parent="Margin/VBox/Buttons"]
+layout_mode = 2
+text = "Discard selected"
+
+[node name="Refresh" type="Button" parent="Margin/VBox/Buttons"]
+layout_mode = 2
+text = "Refresh"

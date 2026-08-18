@@ -1,0 +1,20 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+
+config/name="Blazium Crash Reporter"
+config/description="Official sidecar UI for Blazium utilities (engine, hub, and other first-party tools)."
+config/version="1.0.0"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.5", "Forward Plus")
+
+[display]
+
+window/size/viewport_width=900
+window/size/viewport_height=640
+window/size/resizable=true
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
