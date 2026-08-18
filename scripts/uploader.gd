@@ -1,6 +1,6 @@
 extends RefCounted
 
-static func upload(endpoint: String, api_key: String, crash_dir: String, report_id: String, include_logs: bool) -> Error:
+static func upload(endpoint: String, app_id: String, build_id: String, crash_dir: String, report_id: String, include_logs: bool) -> Error:
 	var dump_path := crash_dir.path_join(report_id + ".dmp")
 	if not FileAccess.file_exists(dump_path):
 		return ERR_FILE_NOT_FOUND
@@ -9,6 +9,7 @@ static func upload(endpoint: String, api_key: String, crash_dir: String, report_
 	var meta_path := crash_dir.path_join(report_id + ".json")
 	if FileAccess.file_exists(meta_path):
 		metadata = FileAccess.get_file_as_string(meta_path)
+	metadata = _fill_identity(metadata, app_id, build_id)
 	var log_bytes := PackedByteArray()
 	if include_logs:
 		log_bytes = _read_log_bytes(crash_dir)
@@ -29,9 +30,9 @@ static func upload(endpoint: String, api_key: String, crash_dir: String, report_
 	var headers := PackedStringArray([
 		"Content-Type: multipart/form-data; boundary=%s" % boundary,
 		"User-Agent: BlaziumCrashReporter/official",
+		"X-App-Id: %s" % app_id,
+		"X-Build-Id: %s" % build_id,
 	])
-	if not api_key.is_empty():
-		headers.append("X-API-Key: %s" % api_key)
 	var err := http.request_raw(endpoint, headers, HTTPClient.METHOD_POST, body)
 	if err != OK:
 		http.queue_free()
@@ -47,15 +48,13 @@ static func upload(endpoint: String, api_key: String, crash_dir: String, report_
 	return FAILED
 
 
-static func http_get(url: String, api_key: String) -> Dictionary:
+static func http_get(url: String) -> Dictionary:
 	var http := HTTPRequest.new()
 	var tree: SceneTree = Engine.get_main_loop()
 	tree.root.add_child.call_deferred(http)
 	while not http.is_inside_tree():
 		await tree.process_frame
 	var headers := PackedStringArray(["User-Agent: BlaziumCrashReporter/official"])
-	if not api_key.is_empty():
-		headers.append("X-API-Key: %s" % api_key)
 	var err := http.request(url, headers, HTTPClient.METHOD_GET)
 	if err != OK:
 		http.queue_free()
@@ -67,18 +66,18 @@ static func http_get(url: String, api_key: String) -> Dictionary:
 	return {"ok": code >= 200 and code < 300, "code": code, "text": body.get_string_from_utf8()}
 
 
-static func fetch_server_detail(endpoint: String, api_key: String, report_id: String) -> String:
+static func fetch_server_detail(endpoint: String, report_id: String) -> String:
 	var report_url := endpoint.rstrip("/") + "/" + report_id
 	var stack_url := report_url + "/stack"
 	var report := {}
 	var stack := ""
 	for _i in 5:
-		var report_res: Dictionary = await http_get(report_url, api_key)
+		var report_res: Dictionary = await http_get(report_url)
 		if report_res.get("ok", false):
 			var parsed: Variant = JSON.parse_string(String(report_res.get("text", "")))
 			if typeof(parsed) == TYPE_DICTIONARY:
 				report = parsed
-		var stack_res: Dictionary = await http_get(stack_url, api_key)
+		var stack_res: Dictionary = await http_get(stack_url)
 		if stack_res.get("ok", false):
 			stack = String(stack_res.get("text", ""))
 		var analysis: Variant = report.get("analysis", {})
@@ -104,12 +103,26 @@ static func format_server_detail(report: Dictionary, stack: String) -> String:
 		lines.append("Crash address: %s" % address)
 	if report.has("id"):
 		lines.append("Report id: %s" % String(report.get("id", "")))
+	if report.has("app_id"):
+		lines.append("App id: %s" % String(report.get("app_id", "")))
+	if report.has("build_id"):
+		lines.append("Build id: %s" % String(report.get("build_id", "")))
 	lines.append("")
 	if stack.is_empty():
 		lines.append("(stackwalk not available yet)")
 	else:
 		lines.append(stack)
 	return "\n".join(lines)
+
+
+static func _fill_identity(metadata: String, app_id: String, build_id: String) -> String:
+	var parsed: Variant = JSON.parse_string(metadata)
+	var meta: Dictionary = parsed if typeof(parsed) == TYPE_DICTIONARY else {}
+	if String(meta.get("app_id", "")).is_empty() and not app_id.is_empty():
+		meta["app_id"] = app_id
+	if String(meta.get("build_id", "")).is_empty() and not build_id.is_empty():
+		meta["build_id"] = build_id
+	return JSON.stringify(meta)
 
 
 static func _read_log_bytes(crash_dir: String) -> PackedByteArray:
