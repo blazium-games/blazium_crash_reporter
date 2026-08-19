@@ -1,6 +1,13 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3 uid="uid://cmowgtxx5abw3"]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://dbnol8bich80m" path="res://scripts/main.gd" id="1_main"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_o5qli"]
+content_margin_left = 16.0
+content_margin_top = 16.0
+content_margin_right = 16.0
+content_margin_bottom = 16.0
+bg_color = Color(0.109804, 0.0862745, 0.172549, 1)
 
 [node name="Main" type="Control"]
 layout_mode = 3
@@ -11,15 +18,14 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_main")
 
-[node name="Margin" type="MarginContainer" parent="."]
+[node name="Margin" type="PanelContainer" parent="."]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-theme_override_constants/margin_left = 16
-theme_override_constants/margin_top = 16
-theme_override_constants/margin_right = 16
-theme_override_constants/margin_bottom = 16
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_o5qli")
 
 [node name="VBox" type="VBoxContainer" parent="Margin"]
 layout_mode = 2
@@ -27,22 +33,22 @@ theme_override_constants/separation = 8
 
 [node name="Title" type="Label" parent="Margin/VBox"]
 layout_mode = 2
+theme_type_variation = &"SmallHeaderLabel"
 text = "Blazium Crash Reporter"
-theme_override_font_sizes/font_size = 22
 
 [node name="Consent" type="Label" parent="Margin/VBox"]
 layout_mode = 2
-autowrap_mode = 3
 text = "A crash dump was saved on this device. Nothing is uploaded until you confirm."
+autowrap_mode = 3
 
 [node name="PrivacyLink" type="LinkButton" parent="Margin/VBox"]
 layout_mode = 2
 text = "Privacy policy"
 
 [node name="Reports" type="ItemList" parent="Margin/VBox"]
+custom_minimum_size = Vector2(0, 160)
 layout_mode = 2
 size_flags_vertical = 3
-custom_minimum_size = Vector2(0, 160)
 
 [node name="Detail" type="TextEdit" parent="Margin/VBox"]
 layout_mode = 2
@@ -83,8 +89,9 @@ placeholder_text = "ci or steam build id"
 
 [node name="IncludeLogs" type="CheckBox" parent="Margin/VBox"]
 layout_mode = 2
-text = "Include log tail"
+mouse_default_cursor_shape = 2
 button_pressed = true
+text = "Include log tail"
 
 [node name="Status" type="Label" parent="Margin/VBox"]
 layout_mode = 2
@@ -95,12 +102,16 @@ layout_mode = 2
 
 [node name="Send" type="Button" parent="Margin/VBox/Buttons"]
 layout_mode = 2
+mouse_default_cursor_shape = 2
+theme_type_variation = &"FilledButton"
 text = "Send selected report"
 
 [node name="Discard" type="Button" parent="Margin/VBox/Buttons"]
 layout_mode = 2
+mouse_default_cursor_shape = 2
 text = "Discard selected"
 
 [node name="Refresh" type="Button" parent="Margin/VBox/Buttons"]
 layout_mode = 2
+mouse_default_cursor_shape = 2
 text = "Refresh"
