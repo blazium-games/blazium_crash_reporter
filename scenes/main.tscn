@@ -79,13 +79,20 @@ unique_name_in_owner = true
 layout_mode = 2
 text = "Privacy policy"
 
-[node name="Reports" type="ItemList" parent="BgPanel/Margin/VBox"]
+[node name="VSplitContainer" type="VSplitContainer" parent="BgPanel/Margin/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+collapse_mode = 1
+
+[node name="Reports" type="ItemList" parent="BgPanel/Margin/VBox/VSplitContainer"]
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 128)
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Detail" type="TextEdit" parent="BgPanel/Margin/VBox"]
+[node name="Detail" type="TextEdit" parent="BgPanel/Margin/VBox/VSplitContainer"]
 unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 64)
 layout_mode = 2
 size_flags_vertical = 3
 editable = false
