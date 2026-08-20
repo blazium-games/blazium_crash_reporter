@@ -11,26 +11,27 @@ var app_id := ""
 var build_id := ""
 var reports: Array = []
 
-@onready var reports_list: ItemList = $Margin/VBox/Reports
-@onready var detail: TextEdit = $Margin/VBox/Detail
-@onready var endpoint_edit: LineEdit = $Margin/VBox/Settings/Endpoint
-@onready var app_id_edit: LineEdit = $Margin/VBox/Settings/AppId
-@onready var build_id_edit: LineEdit = $Margin/VBox/Settings/BuildId
-@onready var include_logs: CheckBox = $Margin/VBox/IncludeLogs
-@onready var status: Label = $Margin/VBox/Status
-@onready var privacy_link: LinkButton = $Margin/VBox/PrivacyLink
+@onready var reports_list: ItemList = %Reports
+@onready var detail: TextEdit = %Detail
+@onready var endpoint_edit: LineEdit = %Endpoint
+@onready var app_id_edit: LineEdit = %AppId
+@onready var build_id_edit: LineEdit = %BuildId
+@onready var include_logs: CheckBox = %IncludeLogs
+@onready var status: Label = %Status
+@onready var privacy_link: LinkButton = %PrivacyLink
 
 
 func _ready() -> void:
+	DisplayServer.window_set_min_size(Vector2i(640, 480))
 	_parse_args()
 	endpoint_edit.text = endpoint
 	app_id_edit.text = app_id
 	build_id_edit.text = build_id
 	privacy_link.visible = not privacy_url.is_empty()
 	privacy_link.uri = privacy_url
-	$Margin/VBox/Buttons/Send.pressed.connect(_on_send)
-	$Margin/VBox/Buttons/Discard.pressed.connect(_on_discard)
-	$Margin/VBox/Buttons/Refresh.pressed.connect(_refresh)
+	%Send.pressed.connect(_on_send)
+	%Discard.pressed.connect(_on_discard)
+	%Refresh.pressed.connect(_refresh)
 	reports_list.item_selected.connect(_on_selected)
 	_refresh()
 	if OS.get_cmdline_args().has("--auto-send") or OS.get_cmdline_user_args().has("--auto-send"):

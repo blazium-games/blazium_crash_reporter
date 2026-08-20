@@ -1,13 +1,30 @@
-[gd_scene load_steps=3 format=3 uid="uid://cmowgtxx5abw3"]
+[gd_scene load_steps=8 format=3 uid="uid://cmowgtxx5abw3"]
 
 [ext_resource type="Script" uid="uid://dbnol8bich80m" path="res://scripts/main.gd" id="1_main"]
 
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_o5qli"]
-content_margin_left = 16.0
-content_margin_top = 16.0
-content_margin_right = 16.0
-content_margin_bottom = 16.0
-bg_color = Color(0.109804, 0.0862745, 0.172549, 1)
+[sub_resource type="Gradient" id="Gradient_tefeu"]
+colors = PackedColorArray(0.262745, 0.160784, 0.407843, 1, 0.172549, 0.0823529, 0.215686, 1)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_o6xl0"]
+gradient = SubResource("Gradient_tefeu")
+fill_from = Vector2(0, 1)
+fill_to = Vector2(0, 0)
+
+[sub_resource type="StyleBoxTexture" id="StyleBoxTexture_tipki"]
+texture = SubResource("GradientTexture2D_o6xl0")
+
+[sub_resource type="Gradient" id="Gradient_o6xl0"]
+colors = PackedColorArray(1, 1, 1, 1, 1, 1, 1, 0.478431)
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_tipki"]
+frequency = 0.4717
+fractal_type = 0
+cellular_distance_function = 1
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_85g3d"]
+seamless = true
+color_ramp = SubResource("Gradient_o6xl0")
+noise = SubResource("FastNoiseLite_tipki")
 
 [node name="Main" type="Control"]
 layout_mode = 3
@@ -18,100 +35,133 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_main")
 
-[node name="Margin" type="PanelContainer" parent="."]
+[node name="BgPanel" type="PanelContainer" parent="."]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-theme_override_styles/panel = SubResource("StyleBoxFlat_o5qli")
+theme_override_styles/panel = SubResource("StyleBoxTexture_tipki")
 
-[node name="VBox" type="VBoxContainer" parent="Margin"]
+[node name="PanelMask" type="TextureRect" parent="BgPanel"]
+mask_parent = 1
+texture_repeat = 2
+layout_mode = 2
+texture = SubResource("NoiseTexture2D_85g3d")
+
+[node name="Margin" type="MarginContainer" parent="BgPanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 8
+
+[node name="VBox" type="VBoxContainer" parent="BgPanel/Margin"]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="Title" type="Label" parent="Margin/VBox"]
+[node name="Title" type="Label" parent="BgPanel/Margin/VBox"]
 layout_mode = 2
 theme_type_variation = &"SmallHeaderLabel"
 text = "Blazium Crash Reporter"
+horizontal_alignment = 1
 
-[node name="Consent" type="Label" parent="Margin/VBox"]
+[node name="Consent" type="Label" parent="BgPanel/Margin/VBox"]
+custom_minimum_size = Vector2(200, 0)
 layout_mode = 2
 text = "A crash dump was saved on this device. Nothing is uploaded until you confirm."
+horizontal_alignment = 1
 autowrap_mode = 3
 
-[node name="PrivacyLink" type="LinkButton" parent="Margin/VBox"]
+[node name="PrivacyLink" type="LinkButton" parent="BgPanel/Margin/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 text = "Privacy policy"
 
-[node name="Reports" type="ItemList" parent="Margin/VBox"]
-custom_minimum_size = Vector2(0, 160)
+[node name="Reports" type="ItemList" parent="BgPanel/Margin/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Detail" type="TextEdit" parent="Margin/VBox"]
+[node name="Detail" type="TextEdit" parent="BgPanel/Margin/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
 editable = false
 wrap_mode = 1
 
-[node name="Settings" type="GridContainer" parent="Margin/VBox"]
+[node name="Settings" type="GridContainer" parent="BgPanel/Margin/VBox"]
 layout_mode = 2
 columns = 2
 
-[node name="EndpointLabel" type="Label" parent="Margin/VBox/Settings"]
+[node name="EndpointLabel" type="Label" parent="BgPanel/Margin/VBox/Settings"]
 layout_mode = 2
 text = "Endpoint"
 
-[node name="Endpoint" type="LineEdit" parent="Margin/VBox/Settings"]
+[node name="Endpoint" type="LineEdit" parent="BgPanel/Margin/VBox/Settings"]
+unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "http://127.0.0.1:8090/v1/reports"
 
-[node name="AppIdLabel" type="Label" parent="Margin/VBox/Settings"]
+[node name="AppIdLabel" type="Label" parent="BgPanel/Margin/VBox/Settings"]
 layout_mode = 2
 text = "App ID"
 
-[node name="AppId" type="LineEdit" parent="Margin/VBox/Settings"]
+[node name="AppId" type="LineEdit" parent="BgPanel/Margin/VBox/Settings"]
+unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "steam-app or product id"
 
-[node name="BuildIdLabel" type="Label" parent="Margin/VBox/Settings"]
+[node name="BuildIdLabel" type="Label" parent="BgPanel/Margin/VBox/Settings"]
 layout_mode = 2
 text = "Build ID"
 
-[node name="BuildId" type="LineEdit" parent="Margin/VBox/Settings"]
+[node name="BuildId" type="LineEdit" parent="BgPanel/Margin/VBox/Settings"]
+unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "ci or steam build id"
 
-[node name="IncludeLogs" type="CheckBox" parent="Margin/VBox"]
+[node name="IncludeLogs" type="CheckBox" parent="BgPanel/Margin/VBox"]
+unique_name_in_owner = true
 layout_mode = 2
 mouse_default_cursor_shape = 2
 button_pressed = true
 text = "Include log tail"
+flat = true
 
-[node name="Status" type="Label" parent="Margin/VBox"]
+[node name="Status" type="Label" parent="BgPanel/Margin/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(200, 0)
 layout_mode = 2
 text = "Ready."
+autowrap_mode = 3
 
-[node name="Buttons" type="HBoxContainer" parent="Margin/VBox"]
+[node name="Buttons" type="HBoxContainer" parent="BgPanel/Margin/VBox"]
 layout_mode = 2
+alignment = 1
 
-[node name="Send" type="Button" parent="Margin/VBox/Buttons"]
+[node name="Send" type="Button" parent="BgPanel/Margin/VBox/Buttons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(160, 0)
 layout_mode = 2
 mouse_default_cursor_shape = 2
 theme_type_variation = &"FilledButton"
-text = "Send selected report"
+text = "Send Report"
 
-[node name="Discard" type="Button" parent="Margin/VBox/Buttons"]
+[node name="Discard" type="Button" parent="BgPanel/Margin/VBox/Buttons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(160, 0)
 layout_mode = 2
 mouse_default_cursor_shape = 2
-text = "Discard selected"
+text = "Discard"
 
-[node name="Refresh" type="Button" parent="Margin/VBox/Buttons"]
+[node name="Refresh" type="Button" parent="BgPanel/Margin/VBox/Buttons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(160, 0)
 layout_mode = 2
 mouse_default_cursor_shape = 2
 text = "Refresh"
