@@ -15,6 +15,22 @@ window/size/viewport_width=900
 window/size/viewport_height=640
 window/size/resizable=true
 
+[gui]
+
+theme/base_color=Color(0.137255, 0.109804, 0.215686, 1)
+theme/accent_color=Color(0.678431, 0.254902, 0.870588, 1)
+theme/font_color_override=3
+theme/custom_font_color=Color(0.941176, 0.913725, 1, 1)
+theme/font_outline_color=Color(0.08, 0.08, 0.08, 0.45098)
+theme/contrast=-1.0
+theme/normal_contrast=-0.169
+theme/hover_contrast=-0.4
+theme/pressed_contrast=-0.245
+theme/border_width=1
+theme/corner_radius=10
+theme/default_font_multichannel_signed_distance_field=true
+theme/custom="uid://57b1m6dp53ek"
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"
