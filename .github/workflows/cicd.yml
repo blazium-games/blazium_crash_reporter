@@ -1,0 +1,353 @@
+name: Build Sign and Publish Crash Reporter
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      simple_version: ${{ steps.finalize.outputs.simple_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get Version with Bioblaze/game-semver-action
+        uses: Bioblaze/game-semver-action@v10
+        id: version
+        with:
+          personal_github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Finalize version (0.1.0 baseline + CDN monotonic)
+        id: finalize
+        run: |
+          set -euo pipefail
+          COMPUTED="${{ steps.version.outputs.simple_version }}"
+          BASE="0.1.0"
+          CDN_LATEST="$(curl -fsSL https://cdn.blazium.app/crash_reporter/crash_reporter.json | jq -r '.latest // empty' || true)"
+          if [[ "$CDN_LATEST" == "null" ]]; then
+            CDN_LATEST=""
+          fi
+
+          CANDIDATE="$(printf '%s\n%s\n' "$COMPUTED" "$BASE" | sort -V | tail -n1)"
+
+          bump_patch() {
+            local v="$1"
+            local major minor patch
+            IFS=. read -r major minor patch <<< "$v"
+            patch="${patch%%[^0-9]*}"
+            echo "${major}.${minor}.$((patch + 1))"
+          }
+
+          if [[ -n "$CDN_LATEST" ]]; then
+            HIGHER="$(printf '%s\n%s\n' "$CANDIDATE" "$CDN_LATEST" | sort -V | tail -n1)"
+            if [[ "$HIGHER" == "$CDN_LATEST" ]]; then
+              CANDIDATE="$(bump_patch "$CDN_LATEST")"
+            fi
+          fi
+
+          echo "computed=${COMPUTED} base=${BASE} cdn_latest=${CDN_LATEST:-none} => ${CANDIDATE}"
+          echo "simple_version=${CANDIDATE}" >> "$GITHUB_OUTPUT"
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test manifest and stamp helpers
+        working-directory: ci
+        run: python -m unittest test_generate_crash_reporter_manifest.py -v
+
+  build:
+    needs: [resolve-version, scripts]
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            preset: Linux/X11
+            output: crash_reporter
+          - os: linux
+            arch: x86_32
+            preset: Linux/X11 x86_32
+            output: crash_reporter
+          - os: windows
+            arch: x86_64
+            preset: Windows Desktop
+            output: crash_reporter.exe
+          - os: windows
+            arch: x86_32
+            preset: Windows Desktop x86_32
+            output: crash_reporter.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Stamp sidecar version
+        run: python ci/stamp_version.py "${{ needs.resolve-version.outputs.simple_version }}"
+
+      - name: Fetch official editor and template
+        id: sdk
+        run: |
+          set -euo pipefail
+          python ci/fetch_official_sdk.py \
+            --platform "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --preset "${{ matrix.preset }}"
+          EDITOR_BIN="$(cat .ci/editor_bin.txt)"
+          TEMPLATE_BIN="$(cat .ci/template_bin.txt)"
+          test -x "$EDITOR_BIN"
+          test -f "$TEMPLATE_BIN"
+          echo "editor=$EDITOR_BIN" >> "$GITHUB_OUTPUT"
+          echo "template=$TEMPLATE_BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Export sidecar
+        run: |
+          set -euo pipefail
+          OUT="build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+          mkdir -p "$(dirname "$OUT")"
+          "${{ steps.sdk.outputs.editor }}" --headless --path "$GITHUB_WORKSPACE" --import || true
+          "${{ steps.sdk.outputs.editor }}" --headless --path "$GITHUB_WORKSPACE" --export-release "${{ matrix.preset }}" "$OUT"
+          test -f "$OUT"
+          if [[ "${{ matrix.os }}" != "windows" ]]; then
+            chmod +x "$OUT"
+          fi
+          echo "### crash_reporter ${{ matrix.os }}/${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
+          du -h "$OUT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compute sha256
+        id: digest
+        run: |
+          set -euo pipefail
+          OUT="build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+          echo "sha256=$(sha256sum "$OUT" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$OUT")" >> "$GITHUB_OUTPUT"
+
+      - name: Import GPG key
+        if: ${{ matrix.os != 'windows' }}
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: GPG sign unix build
+        if: ${{ matrix.os != 'windows' }}
+        run: |
+          gpg --batch --yes \
+            --output "build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}.sig" \
+            --detach-sign "build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+
+      - name: Prepare signed dir (Windows)
+        if: ${{ matrix.os == 'windows' }}
+        run: mkdir -p signed
+
+      - uses: bioblaze/sslcom-code-signer@v5
+        name: Windows Signing
+        if: ${{ matrix.os == 'windows' }}
+        continue-on-error: true
+        id: windows_sign
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ./build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}
+          output_path: ./signed
+          environment_name: PROD
+
+      - name: Prepare Windows artifact
+        if: ${{ matrix.os == 'windows' }}
+        id: windows_artifact
+        run: |
+          set -euo pipefail
+          mkdir -p signed
+          DEST="./signed/${{ matrix.output }}"
+          if [ -f "$DEST" ]; then
+            echo "Using signed Windows binary at $DEST"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          elif SIGNED="$(find ./signed -type f -name '${{ matrix.output }}' | head -n 1)" && [ -n "$SIGNED" ]; then
+            cp "$SIGNED" "$DEST"
+            echo "Using signed Windows binary from $SIGNED"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Windows code signing failed; publishing unsigned build artifact." >&2
+            cp "./build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}" "$DEST"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p "build/${{ matrix.os }}/${{ matrix.arch }}"
+          cp -f "$DEST" "build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+
+      - name: Upload artifacts (unix)
+        uses: actions/upload-artifact@v4
+        if: ${{ matrix.os != 'windows' }}
+        with:
+          name: signed-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            build/${{ matrix.os }}/${{ matrix.arch }}/crash_reporter
+            build/${{ matrix.os }}/${{ matrix.arch }}/crash_reporter.sig
+
+      - name: Upload artifacts (windows)
+        uses: actions/upload-artifact@v4
+        if: ${{ matrix.os == 'windows' }}
+        with:
+          name: signed-windows-${{ matrix.arch }}
+          path: signed/crash_reporter.exe
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}
+          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}
+          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}/${{ needs.resolve-version.outputs.simple_version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        if: ${{ matrix.os != 'windows' }}
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}.sig
+          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        if: ${{ matrix.os != 'windows' }}
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}.sig
+          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}/${{ needs.resolve-version.outputs.simple_version }}
+
+      - name: Updating Cerebro
+        env:
+          URL: https://cdn.blazium.app/crash_reporter/${{ matrix.os }}/${{ matrix.arch }}/${{ needs.resolve-version.outputs.simple_version }}/${{ matrix.output }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.os }}" != "windows" ]]; then
+            SIG_URL="${URL}.sig"
+            SIGNING="gpg"
+          elif [[ "${{ steps.windows_artifact.outputs.signed }}" == "true" ]]; then
+            SIG_URL=""
+            SIGNING="sslcom"
+          else
+            SIG_URL=""
+            SIGNING=""
+          fi
+          curl -s -X POST "${{ secrets.CEREBRO_URL }}/api/v1/tools" \
+          -H "Content-Type: application/json" \
+          -H "BLAZIUM_AUTH: ${{ secrets.BLAZIUM_AUTH }}" \
+          -d "$(cat <<EOF
+          {
+            "name": "Blazium Crash Reporter",
+            "type": "crash_reporter",
+            "version": "${{ needs.resolve-version.outputs.simple_version }}",
+            "os": "${{ matrix.os }}",
+            "arch": "${{ matrix.arch }}",
+            "file": "$URL",
+            "sig": "$SIG_URL",
+            "sha256": "${{ steps.digest.outputs.sha256 }}",
+            "size": ${{ steps.digest.outputs.size }},
+            "signing": "$SIGNING",
+            "released_on": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          )"
+
+  manifest:
+    needs: [resolve-version, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-linux-x86_64
+          path: artifacts/linux/x86_64
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: signed-linux-x86_32
+          path: artifacts/linux/x86_32
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-x86_64
+          path: artifacts/windows/x86_64
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: signed-windows-x86_32
+          path: artifacts/windows/x86_32
+
+      - name: Download existing manifest
+        continue-on-error: true
+        run: curl -fsSL https://cdn.blazium.app/crash_reporter/crash_reporter.json -o existing-crash_reporter.json
+
+      - name: Generate crash_reporter.json
+        run: |
+          set -euo pipefail
+          ARGS=(--version "${{ needs.resolve-version.outputs.simple_version }}" --artifacts artifacts --out crash_reporter.json)
+          if [ -f existing-crash_reporter.json ]; then
+            ARGS+=(--base-manifest existing-crash_reporter.json)
+          fi
+          python ci/generate_crash_reporter_manifest.py "${ARGS[@]}"
+          test -f artifacts/windows/x86_64/crash_reporter.exe
+          test -f artifacts/linux/x86_64/crash_reporter
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: crash_reporter.json
+          out_dir: crash_reporter
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: crash_reporter.json
+          out_dir: crash_reporter/${{ needs.resolve-version.outputs.simple_version }}
