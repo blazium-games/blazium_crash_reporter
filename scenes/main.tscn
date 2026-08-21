@@ -90,54 +90,27 @@ custom_minimum_size = Vector2(0, 128)
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="Detail" type="TextEdit" parent="BgPanel/Margin/VBox/VSplitContainer"]
+[node name="UserMessage" type="TextEdit" parent="BgPanel/Margin/VBox/VSplitContainer"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 64)
 layout_mode = 2
 size_flags_vertical = 3
-editable = false
+placeholder_text = "What happened?"
 wrap_mode = 1
 
-[node name="Settings" type="GridContainer" parent="BgPanel/Margin/VBox"]
-layout_mode = 2
-columns = 2
-
-[node name="EndpointLabel" type="Label" parent="BgPanel/Margin/VBox/Settings"]
-layout_mode = 2
-text = "Endpoint"
-
-[node name="Endpoint" type="LineEdit" parent="BgPanel/Margin/VBox/Settings"]
+[node name="SendAnonymous" type="CheckBox" parent="BgPanel/Margin/VBox"]
 unique_name_in_owner = true
 layout_mode = 2
-size_flags_horizontal = 3
-placeholder_text = "http://127.0.0.1:8090/v1/reports"
+mouse_default_cursor_shape = 2
+text = "Send anonymously"
+flat = true
 
-[node name="AppIdLabel" type="Label" parent="BgPanel/Margin/VBox/Settings"]
-layout_mode = 2
-text = "App ID"
-
-[node name="AppId" type="LineEdit" parent="BgPanel/Margin/VBox/Settings"]
-unique_name_in_owner = true
-layout_mode = 2
-size_flags_horizontal = 3
-placeholder_text = "steam-app or product id"
-
-[node name="BuildIdLabel" type="Label" parent="BgPanel/Margin/VBox/Settings"]
-layout_mode = 2
-text = "Build ID"
-
-[node name="BuildId" type="LineEdit" parent="BgPanel/Margin/VBox/Settings"]
-unique_name_in_owner = true
-layout_mode = 2
-size_flags_horizontal = 3
-placeholder_text = "ci or steam build id"
-
-[node name="IncludeLogs" type="CheckBox" parent="BgPanel/Margin/VBox"]
+[node name="IncludeAttachments" type="CheckBox" parent="BgPanel/Margin/VBox"]
 unique_name_in_owner = true
 layout_mode = 2
 mouse_default_cursor_shape = 2
 button_pressed = true
-text = "Include log tail"
+text = "Include dump and logs"
 flat = true
 
 [node name="Status" type="Label" parent="BgPanel/Margin/VBox"]
