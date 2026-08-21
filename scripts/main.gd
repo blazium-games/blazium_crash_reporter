@@ -12,11 +12,9 @@ var build_id := ""
 var reports: Array = []
 
 @onready var reports_list: ItemList = %Reports
-@onready var detail: TextEdit = %Detail
-@onready var endpoint_edit: LineEdit = %Endpoint
-@onready var app_id_edit: LineEdit = %AppId
-@onready var build_id_edit: LineEdit = %BuildId
-@onready var include_logs: CheckBox = %IncludeLogs
+@onready var user_message: TextEdit = %UserMessage
+@onready var include_attachments: CheckBox = %IncludeAttachments
+@onready var send_anonymous: CheckBox = %SendAnonymous
 @onready var status: Label = %Status
 @onready var privacy_link: LinkButton = %PrivacyLink
 
@@ -24,9 +22,6 @@ var reports: Array = []
 func _ready() -> void:
 	DisplayServer.window_set_min_size(Vector2i(640, 480))
 	_parse_args()
-	endpoint_edit.text = endpoint
-	app_id_edit.text = app_id
-	build_id_edit.text = build_id
 	privacy_link.visible = not privacy_url.is_empty()
 	privacy_link.uri = privacy_url
 	%Send.pressed.connect(_on_send)
@@ -35,12 +30,15 @@ func _ready() -> void:
 	reports_list.item_selected.connect(_on_selected)
 	_refresh()
 	if OS.get_cmdline_args().has("--auto-send") or OS.get_cmdline_user_args().has("--auto-send"):
+		user_message.text = ""
+		include_attachments.button_pressed = true
+		send_anonymous.button_pressed = false
 		await get_tree().process_frame
 		await get_tree().create_timer(0.25).timeout
 		await _on_send()
 		print("SIDECAR_STATUS=%s" % status.text)
 		print("SIDECAR_DETAIL_BEGIN")
-		print(detail.text)
+		print(status.text)
 		print("SIDECAR_DETAIL_END")
 		get_tree().quit()
 
@@ -111,8 +109,7 @@ func _refresh() -> void:
 		fname = dir.get_next()
 	dir.list_dir_end()
 	if reports.is_empty():
-		status.text = "No pending crash reports in %s" % crash_dir
-		detail.text = ""
+		status.text = "No pending crash reports."
 		return
 	var select := 0
 	if not report_id.is_empty():
@@ -125,23 +122,35 @@ func _refresh() -> void:
 	status.text = "Found %d pending report(s)." % reports.size()
 
 
-func _on_selected(index: int) -> void:
-	if index < 0 or index >= reports.size():
-		return
-	var row: Dictionary = reports[index]
-	var meta: Dictionary = row.get("metadata", {})
-	detail.text = JSON.stringify(meta, "\t")
-	if app_id_edit.text.strip_edges().is_empty():
-		app_id_edit.text = String(meta.get("app_id", ""))
-	if build_id_edit.text.strip_edges().is_empty():
-		build_id_edit.text = String(meta.get("build_id", ""))
+func _on_selected(_index: int) -> void:
+	pass
+
+
+func _selected_row() -> Dictionary:
+	var selected := reports_list.get_selected_items()
+	if selected.is_empty() or selected[0] >= reports.size():
+		return {}
+	return reports[selected[0]]
 
 
 func _selected_id() -> String:
-	var selected := reports_list.get_selected_items()
-	if selected.is_empty() or selected[0] >= reports.size():
-		return ""
-	return reports[selected[0]]["id"]
+	var row := _selected_row()
+	return String(row.get("id", ""))
+
+
+func _resolved_identity() -> Dictionary:
+	var row := _selected_row()
+	var meta: Dictionary = row.get("metadata", {})
+	var send_app := app_id.strip_edges()
+	var send_build := build_id.strip_edges()
+	var send_endpoint := endpoint.strip_edges()
+	if send_app.is_empty():
+		send_app = String(meta.get("app_id", "")).strip_edges()
+	if send_build.is_empty():
+		send_build = String(meta.get("build_id", "")).strip_edges()
+	if send_endpoint.is_empty():
+		send_endpoint = String(meta.get("endpoint", "")).strip_edges()
+	return {"app_id": send_app, "build_id": send_build, "endpoint": send_endpoint}
 
 
 func _on_discard() -> void:
@@ -152,7 +161,7 @@ func _on_discard() -> void:
 		var path := crash_dir.path_join(id + ext)
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
-	status.text = "Discarded %s." % id
+	status.text = "Discarded report."
 	_refresh()
 
 
@@ -161,25 +170,28 @@ func _on_send() -> void:
 	if id.is_empty():
 		status.text = "Select a report first."
 		return
-	var url := endpoint_edit.text.strip_edges()
-	if url.is_empty():
-		status.text = "Set an endpoint before sending."
+	var identity := _resolved_identity()
+	var url: String = identity["endpoint"]
+	var send_app: String = identity["app_id"]
+	var send_build: String = identity["build_id"]
+	if url.is_empty() or send_app.is_empty() or send_build.is_empty():
+		status.text = "This report cannot be sent. The application identity is missing."
 		return
-	var send_app := app_id_edit.text.strip_edges()
-	var send_build := build_id_edit.text.strip_edges()
-	if send_app.is_empty() or send_build.is_empty():
-		status.text = "Set App ID and Build ID before sending."
-		return
-	status.text = "Uploading %s..." % id
-	var err := await Uploader.upload(url, send_app, send_build, crash_dir, id, include_logs.button_pressed)
+	status.text = "Uploading report..."
+	var err := await Uploader.upload(
+		url,
+		send_app,
+		send_build,
+		crash_dir,
+		id,
+		include_attachments.button_pressed,
+		user_message.text.strip_edges(),
+		send_anonymous.button_pressed
+	)
 	if err == OK:
-		status.text = "Uploaded %s. Fetching stackwalk..." % id
-		var server_detail := await Uploader.fetch_server_detail(url, id)
-		detail.text = server_detail
-		if server_detail.contains("Crash reason:") and not server_detail.contains("(pending)"):
-			status.text = "Uploaded %s. Server analysis ready." % id
-		else:
-			status.text = "Uploaded %s. Stackwalk still pending." % id
-	else:
-		status.text = "Upload failed for %s (error %s)." % [id, error_string(err)]
+		user_message.editable = false
 		_refresh()
+		status.text = "Thank you. Report id: %s" % id
+	else:
+		_refresh()
+		status.text = "Upload failed. Please try again."
