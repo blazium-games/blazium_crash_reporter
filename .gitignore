@@ -1,5 +1,6 @@
 .godot/
 .blazium/
+.ci/
 *.uid
 bin/
 *.exe
