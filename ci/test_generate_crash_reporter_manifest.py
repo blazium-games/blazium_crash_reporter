@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from generate_crash_reporter_manifest import merge_version, pick_latest
+from patch_export_template import patch_preset
 from stamp_version import four_part, stamp_project
 
 
@@ -49,6 +50,24 @@ class StampTests(unittest.TestCase):
             path.write_text('config/name="x"\nconfig/version="1.0.0"\n', encoding="utf-8")
             stamp_project(path, "0.3.1")
             self.assertIn('config/version="0.3.1"', path.read_text(encoding="utf-8"))
+
+
+class PatchPresetTests(unittest.TestCase):
+    def test_patches_named_preset_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            presets = root / "export_presets.cfg"
+            presets.write_text(
+                '[preset.0]\nname="Linux/X11"\n[preset.0.options]\ncustom_template/release=""\n'
+                '[preset.1]\nname="Linux/X11 x86_32"\n[preset.1.options]\ncustom_template/release=""\n',
+                encoding="utf-8",
+            )
+            tpl = root / "template_release"
+            tpl.write_bytes(b"x")
+            patch_preset(presets, "Linux/X11", tpl)
+            text = presets.read_text(encoding="utf-8")
+            self.assertIn(f'custom_template/release="{tpl.resolve().as_posix()}"', text)
+            self.assertEqual(text.count('custom_template/release=""'), 1)
 
 
 if __name__ == "__main__":

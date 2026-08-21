@@ -2,20 +2,92 @@ name: Build Sign and Publish Crash Reporter
 
 on:
   push:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
+    branches: [main, master]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      force_engine_rebuild:
+        description: Skip engine binary cache and rebuild all matrix cells
+        type: boolean
+        default: false
+
+concurrency:
+  group: crash-reporter-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  resolve-version:
-    runs-on: ubuntu-latest
+  autowork:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test CI helpers
+        working-directory: ci
+        run: python -m unittest discover -v
+
+      - name: Download Blazium editor (nightly)
+        id: editor
+        run: |
+          set -euo pipefail
+          LATEST="$(curl -fsSL https://cdn.blazium.app/catalog/versions/nightly/latest.json)"
+          VER="$(printf '%s' "$LATEST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          EDITORS_URL="https://cdn.blazium.app/nightly/${VER}/editors.json"
+          ZIP_URL="$(curl -fsSL "$EDITORS_URL" | python3 -c '
+          import json,sys
+          for e in json.load(sys.stdin):
+              name=e.get("filename","")
+              if name.endswith("linux.x86_64.zip") and ".mono." not in name:
+                  print(e["download_url"]); break
+          else:
+              raise SystemExit("linux editor zip not found")
+          ')"
+          mkdir -p .ci/editor
+          curl -fsSL "$ZIP_URL" -o .ci/editor/blazium.zip
+          python3 - <<'PY'
+          import zipfile
+          zipfile.ZipFile(".ci/editor/blazium.zip").extractall(".ci/editor/out")
+          PY
+          BIN="$(find .ci/editor/out -type f -name 'blazium*' -perm -111 | head -n1 || true)"
+          if [ -z "$BIN" ]; then
+            BIN="$(find .ci/editor/out -type f \( -name 'Blazium*' -o -name 'blazium*' \) | head -n1)"
+          fi
+          test -n "$BIN"
+          chmod +x "$BIN"
+          PREFERRED="$(find .ci/editor/out -type f -name 'blazium*x86_64' ! -name '*.console' | head -n1 || true)"
+          if [ -n "$PREFERRED" ]; then
+            BIN="$PREFERRED"
+            chmod +x "$BIN"
+          fi
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          echo "Using $BIN (Blazium $VER)"
+          "$BIN" --version || true
+
+      - name: Import project
+        run: |
+          set -euo pipefail
+          "${{ steps.editor.outputs.bin }}" --headless --path "$GITHUB_WORKSPACE" --import || true
+          "${{ steps.editor.outputs.bin }}" --headless --path "$GITHUB_WORKSPACE" --quit
+
+  resolve-engine:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [autowork]
+    runs-on: ubuntu-22.04
     outputs:
-      simple_version: ${{ steps.finalize.outputs.simple_version }}
+      version: ${{ steps.ver.outputs.version }}
+      blazium_ref: ${{ steps.ref.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,146 +95,564 @@ jobs:
 
       - name: Get Version with Bioblaze/game-semver-action
         uses: Bioblaze/game-semver-action@v10
-        id: version
+        id: semver
         with:
           personal_github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Finalize version (0.1.0 baseline + CDN monotonic)
-        id: finalize
+      - name: Resolve newest nightly engine
+        id: ref
+        run: python3 ci/resolve_nightly_engine.py --fallback ci/BLAZIUM_REF
+
+      - name: Sidecar version
+        id: ver
+        env:
+          SEMVER_SIMPLE: ${{ steps.semver.outputs.simple_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          COMPUTED="${{ steps.version.outputs.simple_version }}"
-          BASE="0.1.0"
-          CDN_LATEST="$(curl -fsSL https://cdn.blazium.app/crash_reporter/crash_reporter.json | jq -r '.latest // empty' || true)"
-          if [[ "$CDN_LATEST" == "null" ]]; then
-            CDN_LATEST=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            V="${GITHUB_REF#refs/tags/v}"
+          else
+            V="$(python3 - <<'PY'
+          import json, os, re, subprocess, urllib.request
+
+          def parse(v: str):
+              parts = [p for p in re.split(r"[^\d]+", v.strip()) if p != ""]
+              nums = [int(p) if p.isdigit() else 0 for p in parts[:3]]
+              while len(nums) < 3:
+                  nums.append(0)
+              return tuple(nums)
+
+          def fmt(t):
+              return f"{t[0]}.{t[1]}.{t[2]}"
+
+          def bump_patch(t):
+              return (t[0], t[1], t[2] + 1)
+
+          semver = os.environ.get("SEMVER_SIMPLE", "").strip()
+          if not semver:
+              raise SystemExit("empty SEMVER_SIMPLE")
+          cand = parse(semver)
+          if cand < (0, 1, 0):
+              cand = (0, 1, 0)
+
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/tags?per_page=100",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              tags = json.load(resp)
+          highest = None
+          for tag in tags:
+              name = tag.get("name") or ""
+              m = re.match(r"^v?(\d+\.\d+\.\d+)$", name.strip())
+              if not m:
+                  continue
+              t = parse(m.group(1))
+              if highest is None or t > highest:
+                  highest = t
+
+          if highest is not None and cand <= highest:
+              cand = bump_patch(highest)
+
+          cdn_latest = ""
+          try:
+              with urllib.request.urlopen("https://cdn.blazium.app/crash_reporter/crash_reporter.json", timeout=20) as resp:
+                  doc = json.load(resp)
+              cdn_latest = str(doc.get("latest") or "").strip()
+          except Exception:
+              cdn_latest = ""
+          if cdn_latest:
+              cdn = parse(cdn_latest)
+              if cand <= cdn:
+                  cand = bump_patch(cdn)
+          print(fmt(cand))
+          PY
+          )"
+            V="$(printf '%s\n' "$V" | tail -n1 | tr -d '[:space:]')"
           fi
+          test -n "$V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Crash reporter version: $V"
 
-          CANDIDATE="$(printf '%s\n%s\n' "$COMPUTED" "$BASE" | sort -V | tail -n1)"
-
-          bump_patch() {
-            local v="$1"
-            local major minor patch
-            IFS=. read -r major minor patch <<< "$v"
-            patch="${patch%%[^0-9]*}"
-            echo "${major}.${minor}.$((patch + 1))"
-          }
-
-          if [[ -n "$CDN_LATEST" ]]; then
-            HIGHER="$(printf '%s\n%s\n' "$CANDIDATE" "$CDN_LATEST" | sort -V | tail -n1)"
-            if [[ "$HIGHER" == "$CDN_LATEST" ]]; then
-              CANDIDATE="$(bump_patch "$CDN_LATEST")"
-            fi
-          fi
-
-          echo "computed=${COMPUTED} base=${BASE} cdn_latest=${CDN_LATEST:-none} => ${CANDIDATE}"
-          echo "simple_version=${CANDIDATE}" >> "$GITHUB_OUTPUT"
-
-  scripts:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Test manifest and stamp helpers
-        working-directory: ci
-        run: python -m unittest test_generate_crash_reporter_manifest.py -v
-
-  build:
-    needs: [resolve-version, scripts]
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: ubuntu-22.04
+  build-engine:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: linux
+          - runner: ubuntu-22.04
+            platform: linuxbsd
             arch: x86_64
-            preset: Linux/X11
-            output: crash_reporter
-          - os: linux
-            arch: x86_32
-            preset: Linux/X11 x86_32
-            output: crash_reporter
-          - os: windows
+            target: editor
+            msvc_arch: ""
+          - runner: windows-2022
+            platform: windows
             arch: x86_64
-            preset: Windows Desktop
-            output: crash_reporter.exe
-          - os: windows
+            target: editor
+            msvc_arch: x64
+          - runner: ubuntu-22.04
+            platform: linuxbsd
+            arch: x86_64
+            target: template_release
+            msvc_arch: ""
+          - runner: ubuntu-22.04
+            platform: linuxbsd
             arch: x86_32
-            preset: Windows Desktop x86_32
-            output: crash_reporter.exe
+            target: template_release
+            msvc_arch: ""
+          - runner: windows-2022
+            platform: windows
+            arch: x86_64
+            target: template_release
+            msvc_arch: x64
+          - runner: windows-2022
+            platform: windows
+            arch: x86_32
+            target: template_release
+            msvc_arch: x86
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Cache key suffix
+        id: cachekey
+        run: |
+          set -euo pipefail
+          FORCE=""
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_engine_rebuild }}" == "true" ]]; then
+            FORCE="-force-${{ github.run_id }}"
+          fi
+          KEY="cr-engine-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}-${{ needs.resolve-engine.outputs.blazium_ref }}-${{ needs.resolve-engine.outputs.version }}-${{ hashFiles('ci/crash_reporter_scons.env') }}-pearch2-id1${FORCE}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "Binary cache key: $KEY"
+
+      - name: Restore binary cache
+        id: bin-cache
+        uses: actions/cache@v4
         with:
-          python-version: "3.12"
+          path: .ci/out
+          key: ${{ steps.cachekey.outputs.key }}
+
+      - name: Checkout blazium engine
+        if: steps.bin-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: blazium-games/blazium
+          ref: ${{ needs.resolve-engine.outputs.blazium_ref }}
+          path: .ci/engine
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Patch MSVC VCVARS TARGET_ARCH
+        if: steps.bin-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          p = Path(".ci/engine/platform/windows/detect.py")
+          text = p.read_text(encoding="utf-8")
+          marker = "# Hub CI: set TARGET_ARCH for VCVARS/msvc-dev-cmd"
+          if marker in text:
+              print("detect.py already patched")
+              raise SystemExit(0)
+          needle = (
+              '    print("Using VCVARS-determined MSVC, arch %s" % (env_arch))\n\n'
+              "    # Replace any early-loaded mingw/default tools with MSVC (same as setup_msvc_auto).\n"
+          )
+          insert = (
+              '    print("Using VCVARS-determined MSVC, arch %s" % (env_arch))\n\n'
+              f"    {marker}\n"
+              '    msvc_arch_aliases = {"x86_32": "x86", "arm32": "arm"}\n'
+              '    if env["arch"] in msvc_arch_aliases:\n'
+              '        env["TARGET_ARCH"] = msvc_arch_aliases[env["arch"]]\n'
+              "    else:\n"
+              '        env["TARGET_ARCH"] = env["arch"]\n\n'
+              "    # Replace any early-loaded mingw/default tools with MSVC (same as setup_msvc_auto).\n"
+          )
+          if needle not in text:
+              raise SystemExit("detect.py patch anchor not found; update sidecar CI patch")
+          p.write_text(text.replace(needle, insert, 1), encoding="utf-8")
+          print("Patched setup_msvc_manual to set TARGET_ARCH")
+          PY
+
+      - name: Free disk space (Linux)
+        if: steps.bin-cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          df -h
+
+      - name: Install Linux build dependencies
+        if: steps.bin-cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential scons pkg-config libx11-dev libxcursor-dev libxinerama-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev \
+            libxi-dev libxrandr-dev yasm ccache patchelf
+          if [[ "${{ matrix.arch }}" == "x86_32" ]]; then
+            sudo dpkg --add-architecture i386
+            sudo apt-get update
+            sudo apt-get install -y gcc-multilib g++-multilib \
+              libx11-dev:i386 libxcursor-dev:i386 libxinerama-dev:i386 \
+              libxi-dev:i386 libxrandr-dev:i386 libgl1-mesa-dev:i386 \
+              libasound2-dev:i386 libpulse-dev:i386 libudev-dev:i386
+          fi
+
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows' || steps.bin-cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.11"
+
+      - name: Install SCons
+        if: steps.bin-cache.outputs.cache-hit != 'true'
+        run: pip install scons==4.7.0
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: steps.bin-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Load sidecar SCons flags
+        if: steps.bin-cache.outputs.cache-hit != 'true'
+        run: |
+          set -a
+          # shellcheck disable=SC1091
+          source ci/crash_reporter_scons.env
+          set +a
+          mkdir -p .ci/flags
+          printf '%s' "$CR_SCONS_COMMON" > .ci/flags/common.txt
+          printf '%s' "$CR_SCONS_EDITOR editor_build_id=${{ needs.resolve-engine.outputs.blazium_ref }}" > .ci/flags/editor.txt
+          printf '%s' "$CR_SCONS_TEMPLATE template_build_id=${{ needs.resolve-engine.outputs.version }}" > .ci/flags/template.txt
+          echo "COMMON: $(cat .ci/flags/common.txt)"
+          echo "EDITOR EXTRA: $(cat .ci/flags/editor.txt)"
+          echo "TEMPLATE EXTRA: $(cat .ci/flags/template.txt)"
+
+      - name: ccache
+        if: steps.bin-cache.outputs.cache-hit != 'true'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ steps.cachekey.outputs.key }}-ccache
+          max-size: 2G
+
+      - name: Build engine binary
+        if: steps.bin-cache.outputs.cache-hit != 'true'
+        working-directory: .ci/engine
+        run: |
+          set -euo pipefail
+          JOBS="$(nproc 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-8}")"
+          EXTRA=""
+          if [[ "${{ matrix.target }}" == "template_release" ]]; then
+            EXTRA="$(cat ../flags/template.txt)"
+          else
+            EXTRA="$(cat ../flags/editor.txt)"
+          fi
+          LINK_EXTRA=""
+          if [[ "${{ matrix.platform }}" == "windows" && "${{ matrix.arch }}" == "x86_32" ]]; then
+            LINK_EXTRA='linkflags=/MACHINE:X86'
+            if [[ -n "${LIB:-}" ]]; then
+              LIB="$(printf '%s' "$LIB" | tr ';' '\n' | grep -viE '[\\/](x64|arm64)(\\|/|$)' | paste -sd';' - || true)"
+              export LIB
+              echo "Filtered LIB for x86_32 (no x64/arm64): $LIB"
+            fi
+          fi
+          # shellcheck disable=SC2046,SC2086
+          scons -j"$JOBS" platform=${{ matrix.platform }} target=${{ matrix.target }} arch=${{ matrix.arch }} \
+            $(cat ../flags/common.txt) $EXTRA $LINK_EXTRA \
+            compiledb=no verbose=yes
+          ls -lh bin/ || true
+
+      - name: Stage binary
+        if: steps.bin-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          TARGET="${{ matrix.target }}"
+          ARCH="${{ matrix.arch }}"
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            BIN=$(find .ci/engine/bin -maxdepth 1 -type f -name "blazium.*.${TARGET}.${ARCH}.exe" ! -name '*.console.exe' | head -n1)
+            OUT=".ci/out/${TARGET}.exe"
+            MIN=10485760
+            if [[ "$TARGET" == "template_release" ]]; then MIN=5242880; fi
+          else
+            BIN=$(find .ci/engine/bin -maxdepth 1 -type f -name "blazium.*.${TARGET}.${ARCH}" ! -name '*.console*' ! -name '*.o' | head -n1)
+            OUT=".ci/out/${TARGET}"
+            MIN=10485760
+            if [[ "$TARGET" == "template_release" ]]; then MIN=5242880; fi
+          fi
+          test -n "${BIN:-}"
+          test "$(stat -c%s "$BIN")" -ge "$MIN"
+          cp "$BIN" "$OUT"
+          chmod +x "$OUT" || true
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            python ci/assert_pe_arch.py "$OUT" "$ARCH"
+          fi
+          ls -lh .ci/out/
+          echo "### ${{ matrix.platform }} ${{ matrix.arch }} ${{ matrix.target }}" >> "$GITHUB_STEP_SUMMARY"
+          ls -lh "$OUT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify cached binary
+        if: steps.bin-cache.outputs.cache-hit == 'true'
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            test -f ".ci/out/${{ matrix.target }}.exe"
+            ls -lh ".ci/out/${{ matrix.target }}.exe"
+            python ci/assert_pe_arch.py ".ci/out/${{ matrix.target }}.exe" "${{ matrix.arch }}"
+          else
+            test -f ".ci/out/${{ matrix.target }}"
+            chmod +x ".ci/out/${{ matrix.target }}"
+            ls -lh ".ci/out/${{ matrix.target }}"
+          fi
+          echo "Restored ${{ matrix.platform }}/${{ matrix.arch }}/${{ matrix.target }} from binary cache"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}
+          path: .ci/out/
+          retention-days: 3
+
+  export-linux:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine, build-engine]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            preset: Linux/X11
+          - arch: x86_32
+            preset: Linux/X11 x86_32
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-linuxbsd-x86_64-editor
+          path: .ci/out/linux-editor
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-linuxbsd-${{ matrix.arch }}-template_release
+          path: .ci/out/linux-template
+
+      - name: Arrange editor + template paths
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out/linux
+          cp .ci/out/linux-editor/editor .ci/out/linux/editor
+          cp .ci/out/linux-template/template_release .ci/out/linux/template_release
+          chmod +x .ci/out/linux/editor .ci/out/linux/template_release
+          ls -lh .ci/out/linux/
+          test "$(stat -c%s .ci/out/linux/editor)" -ge 10485760
+          test "$(stat -c%s .ci/out/linux/template_release)" -ge 5242880
 
       - name: Stamp sidecar version
-        run: python ci/stamp_version.py "${{ needs.resolve-version.outputs.simple_version }}"
+        run: python3 ci/stamp_version.py "${{ needs.resolve-engine.outputs.version }}"
 
-      - name: Fetch official editor and template
-        id: sdk
+      - name: Patch matching export preset
+        run: |
+          python3 ci/patch_export_template.py \
+            --preset "${{ matrix.preset }}" \
+            --template .ci/out/linux/template_release
+
+      - name: Export Linux sidecar
         run: |
           set -euo pipefail
-          python ci/fetch_official_sdk.py \
-            --platform "${{ matrix.os }}" \
-            --arch "${{ matrix.arch }}" \
-            --preset "${{ matrix.preset }}"
-          EDITOR_BIN="$(cat .ci/editor_bin.txt)"
-          TEMPLATE_BIN="$(cat .ci/template_bin.txt)"
-          test -x "$EDITOR_BIN"
-          test -f "$TEMPLATE_BIN"
-          echo "editor=$EDITOR_BIN" >> "$GITHUB_OUTPUT"
-          echo "template=$TEMPLATE_BIN" >> "$GITHUB_OUTPUT"
-
-      - name: Export sidecar
-        run: |
-          set -euo pipefail
-          OUT="build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+          OUT="build/linux/${{ matrix.arch }}/crash_reporter"
           mkdir -p "$(dirname "$OUT")"
-          "${{ steps.sdk.outputs.editor }}" --headless --path "$GITHUB_WORKSPACE" --import || true
-          "${{ steps.sdk.outputs.editor }}" --headless --path "$GITHUB_WORKSPACE" --export-release "${{ matrix.preset }}" "$OUT"
+          .ci/out/linux/editor --headless --path . --export-release "${{ matrix.preset }}" "$OUT"
+          chmod +x "$OUT"
           test -f "$OUT"
-          if [[ "${{ matrix.os }}" != "windows" ]]; then
-            chmod +x "$OUT"
-          fi
-          echo "### crash_reporter ${{ matrix.os }}/${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### crash_reporter linux ${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
           du -h "$OUT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compute sha256
         id: digest
         run: |
-          set -euo pipefail
-          OUT="build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+          OUT="build/linux/${{ matrix.arch }}/crash_reporter"
           echo "sha256=$(sha256sum "$OUT" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "size=$(stat -c%s "$OUT")" >> "$GITHUB_OUTPUT"
 
-      - name: Import GPG key
-        if: ${{ matrix.os != 'windows' }}
+      - name: GPG sign
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gnupg
+          set -euo pipefail
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --yes --output build/linux/${{ matrix.arch }}/crash_reporter.sig \
+            --detach-sign build/linux/${{ matrix.arch }}/crash_reporter
 
-      - name: GPG sign unix build
-        if: ${{ matrix.os != 'windows' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-linux-${{ matrix.arch }}
+          path: |
+            build/linux/${{ matrix.arch }}/crash_reporter
+            build/linux/${{ matrix.arch }}/crash_reporter.sig
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/linux/${{ matrix.arch }}/crash_reporter
+          out_dir: crash_reporter/linux/${{ matrix.arch }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/linux/${{ matrix.arch }}/crash_reporter
+          out_dir: crash_reporter/linux/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/linux/${{ matrix.arch }}/crash_reporter.sig
+          out_dir: crash_reporter/linux/${{ matrix.arch }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: build/linux/${{ matrix.arch }}/crash_reporter.sig
+          out_dir: crash_reporter/linux/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}
+
+      - name: Updating Cerebro
+        env:
+          URL: https://cdn.blazium.app/crash_reporter/linux/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}/crash_reporter
         run: |
-          gpg --batch --yes \
-            --output "build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}.sig" \
-            --detach-sign "build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+          curl -s -X POST "${{ secrets.CEREBRO_URL }}/api/v1/tools" \
+          -H "Content-Type: application/json" \
+          -H "BLAZIUM_AUTH: ${{ secrets.BLAZIUM_AUTH }}" \
+          -d "$(cat <<EOF
+          {
+            "name": "Blazium Crash Reporter",
+            "type": "crash_reporter",
+            "version": "${{ needs.resolve-engine.outputs.version }}",
+            "os": "linux",
+            "arch": "${{ matrix.arch }}",
+            "file": "$URL",
+            "sig": "${URL}.sig",
+            "sha256": "${{ steps.digest.outputs.sha256 }}",
+            "size": ${{ steps.digest.outputs.size }},
+            "signing": "gpg",
+            "released_on": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          )"
 
-      - name: Prepare signed dir (Windows)
-        if: ${{ matrix.os == 'windows' }}
-        run: mkdir -p signed
+  export-windows:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine, build-engine]
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            preset: Windows Desktop
+          - arch: x86_32
+            preset: Windows Desktop x86_32
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-windows-x86_64-editor
+          path: .ci/out/windows-editor
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-windows-${{ matrix.arch }}-template_release
+          path: .ci/out/windows-template
+
+      - name: Arrange editor + template paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out/windows
+          cp .ci/out/windows-editor/editor.exe .ci/out/windows/editor.exe
+          cp .ci/out/windows-template/template_release.exe .ci/out/windows/template_release.exe
+          ls -lh .ci/out/windows/
+          test "$(stat -c%s .ci/out/windows/editor.exe)" -ge 10485760
+          test "$(stat -c%s .ci/out/windows/template_release.exe)" -ge 5242880
+
+      - name: Stamp sidecar version
+        shell: bash
+        run: python ci/stamp_version.py "${{ needs.resolve-engine.outputs.version }}"
+
+      - name: Patch matching export preset
+        shell: bash
+        run: |
+          python ci/patch_export_template.py \
+            --preset "${{ matrix.preset }}" \
+            --template .ci/out/windows/template_release.exe
+
+      - name: Export Windows sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="build/windows/${{ matrix.arch }}/crash_reporter.exe"
+          mkdir -p "$(dirname "$OUT")"
+          .ci/out/windows/editor.exe --headless --path . --export-release "${{ matrix.preset }}" "$OUT"
+          test -f "$OUT"
+          echo "### crash_reporter windows ${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
+          ls -lh "$OUT" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned-${{ matrix.arch }}
+          path: build/windows/${{ matrix.arch }}/crash_reporter.exe
+
+  sign-windows:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine, export-windows]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, x86_32]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-unsigned-${{ matrix.arch }}
+          path: build/windows/${{ matrix.arch }}
+
+      - name: Digest unsigned
+        id: digest
+        run: |
+          OUT="build/windows/${{ matrix.arch }}/crash_reporter.exe"
+          test -f "$OUT"
+          echo "sha256=$(sha256sum "$OUT" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$OUT")" >> "$GITHUB_OUTPUT"
+          mkdir -p signed
 
       - uses: bioblaze/sslcom-code-signer@v5
         name: Windows Signing
-        if: ${{ matrix.os == 'windows' }}
         continue-on-error: true
         id: windows_sign
         with:
@@ -171,44 +661,30 @@ jobs:
           password: ${{ secrets.ES_PASSWORD }}
           credential_id: ${{ secrets.CREDENTIAL_ID }}
           totp_secret: ${{ secrets.ES_TOTP_SECRET }}
-          file_path: ./build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}
+          file_path: ./build/windows/${{ matrix.arch }}/crash_reporter.exe
           output_path: ./signed
           environment_name: PROD
 
       - name: Prepare Windows artifact
-        if: ${{ matrix.os == 'windows' }}
         id: windows_artifact
         run: |
           set -euo pipefail
-          mkdir -p signed
-          DEST="./signed/${{ matrix.output }}"
+          DEST="./signed/crash_reporter.exe"
           if [ -f "$DEST" ]; then
-            echo "Using signed Windows binary at $DEST"
             echo "signed=true" >> "$GITHUB_OUTPUT"
-          elif SIGNED="$(find ./signed -type f -name '${{ matrix.output }}' | head -n 1)" && [ -n "$SIGNED" ]; then
+          elif SIGNED="$(find ./signed -type f -name 'crash_reporter.exe' | head -n 1)" && [ -n "$SIGNED" ]; then
             cp "$SIGNED" "$DEST"
-            echo "Using signed Windows binary from $SIGNED"
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "Windows code signing failed; publishing unsigned build artifact." >&2
-            cp "./build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}" "$DEST"
+            cp "./build/windows/${{ matrix.arch }}/crash_reporter.exe" "$DEST"
             echo "signed=false" >> "$GITHUB_OUTPUT"
           fi
-          mkdir -p "build/${{ matrix.os }}/${{ matrix.arch }}"
-          cp -f "$DEST" "build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}"
+          cp -f "$DEST" "./build/windows/${{ matrix.arch }}/crash_reporter.exe"
+          echo "sha256=$(sha256sum "$DEST" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$DEST")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifacts (unix)
-        uses: actions/upload-artifact@v4
-        if: ${{ matrix.os != 'windows' }}
-        with:
-          name: signed-${{ matrix.os }}-${{ matrix.arch }}
-          path: |
-            build/${{ matrix.os }}/${{ matrix.arch }}/crash_reporter
-            build/${{ matrix.os }}/${{ matrix.arch }}/crash_reporter.sig
-
-      - name: Upload artifacts (windows)
-        uses: actions/upload-artifact@v4
-        if: ${{ matrix.os == 'windows' }}
+      - uses: actions/upload-artifact@v4
         with:
           name: signed-windows-${{ matrix.arch }}
           path: signed/crash_reporter.exe
@@ -219,8 +695,8 @@ jobs:
           secret_key: ${{ secrets.DO_SECRET_KEY }}
           space_name: ${{ secrets.DO_SPACE_NAME }}
           space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}
-          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}
+          source: signed/crash_reporter.exe
+          out_dir: crash_reporter/windows/${{ matrix.arch }}
 
       - uses: BetaHuhn/do-spaces-action@v2
         with:
@@ -228,42 +704,16 @@ jobs:
           secret_key: ${{ secrets.DO_SECRET_KEY }}
           space_name: ${{ secrets.DO_SPACE_NAME }}
           space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}
-          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}/${{ needs.resolve-version.outputs.simple_version }}
-
-      - uses: BetaHuhn/do-spaces-action@v2
-        if: ${{ matrix.os != 'windows' }}
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}.sig
-          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}
-
-      - uses: BetaHuhn/do-spaces-action@v2
-        if: ${{ matrix.os != 'windows' }}
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/${{ matrix.os }}/${{ matrix.arch }}/${{ matrix.output }}.sig
-          out_dir: crash_reporter/${{ matrix.os }}/${{ matrix.arch }}/${{ needs.resolve-version.outputs.simple_version }}
+          source: signed/crash_reporter.exe
+          out_dir: crash_reporter/windows/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}
 
       - name: Updating Cerebro
         env:
-          URL: https://cdn.blazium.app/crash_reporter/${{ matrix.os }}/${{ matrix.arch }}/${{ needs.resolve-version.outputs.simple_version }}/${{ matrix.output }}
+          URL: https://cdn.blazium.app/crash_reporter/windows/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}/crash_reporter.exe
         run: |
-          set -euo pipefail
-          if [[ "${{ matrix.os }}" != "windows" ]]; then
-            SIG_URL="${URL}.sig"
-            SIGNING="gpg"
-          elif [[ "${{ steps.windows_artifact.outputs.signed }}" == "true" ]]; then
-            SIG_URL=""
+          if [[ "${{ steps.windows_artifact.outputs.signed }}" == "true" ]]; then
             SIGNING="sslcom"
           else
-            SIG_URL=""
             SIGNING=""
           fi
           curl -s -X POST "${{ secrets.CEREBRO_URL }}/api/v1/tools" \
@@ -273,13 +723,13 @@ jobs:
           {
             "name": "Blazium Crash Reporter",
             "type": "crash_reporter",
-            "version": "${{ needs.resolve-version.outputs.simple_version }}",
-            "os": "${{ matrix.os }}",
+            "version": "${{ needs.resolve-engine.outputs.version }}",
+            "os": "windows",
             "arch": "${{ matrix.arch }}",
             "file": "$URL",
-            "sig": "$SIG_URL",
-            "sha256": "${{ steps.digest.outputs.sha256 }}",
-            "size": ${{ steps.digest.outputs.size }},
+            "sig": "",
+            "sha256": "${{ steps.windows_artifact.outputs.sha256 }}",
+            "size": ${{ steps.windows_artifact.outputs.size }},
             "signing": "$SIGNING",
             "released_on": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           }
@@ -287,9 +737,9 @@ jobs:
           )"
 
   manifest:
-    needs: [resolve-version, build]
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine, export-linux, sign-windows]
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -326,7 +776,7 @@ jobs:
       - name: Generate crash_reporter.json
         run: |
           set -euo pipefail
-          ARGS=(--version "${{ needs.resolve-version.outputs.simple_version }}" --artifacts artifacts --out crash_reporter.json)
+          ARGS=(--version "${{ needs.resolve-engine.outputs.version }}" --artifacts artifacts --out crash_reporter.json)
           if [ -f existing-crash_reporter.json ]; then
             ARGS+=(--base-manifest existing-crash_reporter.json)
           fi
@@ -350,4 +800,4 @@ jobs:
           space_name: ${{ secrets.DO_SPACE_NAME }}
           space_region: ${{ secrets.DO_SPACE_REGION }}
           source: crash_reporter.json
-          out_dir: crash_reporter/${{ needs.resolve-version.outputs.simple_version }}
+          out_dir: crash_reporter/${{ needs.resolve-engine.outputs.version }}
