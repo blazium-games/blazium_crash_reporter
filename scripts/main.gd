@@ -20,6 +20,8 @@ var reports: Array = []
 
 
 func _ready() -> void:
+	if AppVersion != null and AppVersion.active:
+		return
 	DisplayServer.window_set_min_size(Vector2i(640, 480))
 	_parse_args()
 	privacy_link.visible = not privacy_url.is_empty()

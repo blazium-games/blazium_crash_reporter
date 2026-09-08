@@ -51,6 +51,14 @@ class StampTests(unittest.TestCase):
             stamp_project(path, "0.3.1")
             self.assertIn('config/version="0.3.1"', path.read_text(encoding="utf-8"))
 
+    def test_app_version_autoload_is_wired(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        project = (root / "project.blazium").read_text(encoding="utf-8")
+        script = (root / "scripts" / "app_version.gd").read_text(encoding="utf-8")
+        self.assertIn('AppVersion="*res://scripts/app_version.gd"', project)
+        self.assertIn("--app-version", script)
+        self.assertIn("CRASH_REPORTER_VERSION=", script)
+
 
 class PatchPresetTests(unittest.TestCase):
     def test_patches_named_preset_only(self) -> None:
