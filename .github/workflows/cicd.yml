@@ -1,10 +1,14 @@
 name: Build Sign and Publish Crash Reporter
 
+# Pull requests: import/tests only (no signing, CDN, or GitHub Release).
+# Push to main/master, tags, and workflow_dispatch: export, sign, publish, release.
+
 on:
   push:
     branches: [main, master]
     tags: ["v*"]
   pull_request:
+    branches: [main, master]
   workflow_dispatch:
     inputs:
       force_engine_rebuild:
@@ -13,8 +17,8 @@ on:
         default: false
 
 concurrency:
-  group: crash-reporter-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: crash-reporter-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -503,6 +507,7 @@ jobs:
             build/linux/${{ matrix.arch }}/crash_reporter
             build/linux/${{ matrix.arch }}/crash_reporter.sig
 
+      # Unversioned "latest" only. Versioned objects are written by the manifest job.
       - uses: BetaHuhn/do-spaces-action@v2
         with:
           access_key: ${{ secrets.DO_ACCESS_KEY }}
@@ -518,26 +523,8 @@ jobs:
           secret_key: ${{ secrets.DO_SECRET_KEY }}
           space_name: ${{ secrets.DO_SPACE_NAME }}
           space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/linux/${{ matrix.arch }}/crash_reporter
-          out_dir: crash_reporter/linux/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}
-
-      - uses: BetaHuhn/do-spaces-action@v2
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
           source: build/linux/${{ matrix.arch }}/crash_reporter.sig
           out_dir: crash_reporter/linux/${{ matrix.arch }}
-
-      - uses: BetaHuhn/do-spaces-action@v2
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/linux/${{ matrix.arch }}/crash_reporter.sig
-          out_dir: crash_reporter/linux/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}
 
       - name: Updating Cerebro
         env:
@@ -689,6 +676,7 @@ jobs:
           name: signed-windows-${{ matrix.arch }}
           path: signed/crash_reporter.exe
 
+      # Unversioned "latest" only. Versioned objects are written by the manifest job.
       - uses: BetaHuhn/do-spaces-action@v2
         with:
           access_key: ${{ secrets.DO_ACCESS_KEY }}
@@ -697,15 +685,6 @@ jobs:
           space_region: ${{ secrets.DO_SPACE_REGION }}
           source: signed/crash_reporter.exe
           out_dir: crash_reporter/windows/${{ matrix.arch }}
-
-      - uses: BetaHuhn/do-spaces-action@v2
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: signed/crash_reporter.exe
-          out_dir: crash_reporter/windows/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}
 
       - name: Updating Cerebro
         env:
@@ -769,6 +748,22 @@ jobs:
           name: signed-windows-x86_32
           path: artifacts/windows/x86_32
 
+      - name: Normalize artifact layout
+        run: |
+          set -euo pipefail
+          normalize_dir() {
+            local dir="$1"
+            [ -d "$dir" ] || return 0
+            if [ -d "${dir}/signed" ]; then
+              mv "${dir}/signed/"* "${dir}/" 2>/dev/null || true
+              rmdir "${dir}/signed" 2>/dev/null || true
+            fi
+          }
+          for d in artifacts/linux/x86_64 artifacts/linux/x86_32 artifacts/windows/x86_64 artifacts/windows/x86_32; do
+            normalize_dir "$d"
+          done
+          ls -laR artifacts/
+
       - name: Download existing manifest
         continue-on-error: true
         run: curl -fsSL https://cdn.blazium.app/crash_reporter/crash_reporter.json -o existing-crash_reporter.json
@@ -783,6 +778,64 @@ jobs:
           python ci/generate_crash_reporter_manifest.py "${ARGS[@]}"
           test -f artifacts/windows/x86_64/crash_reporter.exe
           test -f artifacts/linux/x86_64/crash_reporter
+
+      # Versioned objects come from the same files hashed into crash_reporter.json.
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_64/crash_reporter
+          out_dir: crash_reporter/linux/x86_64/${{ needs.resolve-engine.outputs.version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_64/crash_reporter.sig
+          out_dir: crash_reporter/linux/x86_64/${{ needs.resolve-engine.outputs.version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        continue-on-error: true
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_32/crash_reporter
+          out_dir: crash_reporter/linux/x86_32/${{ needs.resolve-engine.outputs.version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        continue-on-error: true
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_32/crash_reporter.sig
+          out_dir: crash_reporter/linux/x86_32/${{ needs.resolve-engine.outputs.version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/windows/x86_64/crash_reporter.exe
+          out_dir: crash_reporter/windows/x86_64/${{ needs.resolve-engine.outputs.version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        continue-on-error: true
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/windows/x86_32/crash_reporter.exe
+          out_dir: crash_reporter/windows/x86_32/${{ needs.resolve-engine.outputs.version }}
 
       - uses: BetaHuhn/do-spaces-action@v2
         with:
@@ -801,3 +854,114 @@ jobs:
           space_region: ${{ secrets.DO_SPACE_REGION }}
           source: crash_reporter.json
           out_dir: crash_reporter/${{ needs.resolve-engine.outputs.version }}
+
+  github-release:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine, manifest]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            V="${GITHUB_REF#refs/tags/v}"
+          else
+            V="${{ needs.resolve-engine.outputs.version }}"
+          fi
+          test -n "$V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-linux-x86_64
+          path: artifacts/linux/x86_64
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: signed-linux-x86_32
+          path: artifacts/linux/x86_32
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-x86_64
+          path: artifacts/windows/x86_64
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: signed-windows-x86_32
+          path: artifacts/windows/x86_32
+
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          normalize_dir() {
+            local dir="$1"
+            [ -d "$dir" ] || return 0
+            if [ -d "${dir}/signed" ]; then
+              mv "${dir}/signed/"* "${dir}/" 2>/dev/null || true
+              rmdir "${dir}/signed" 2>/dev/null || true
+            fi
+          }
+          for d in artifacts/linux/x86_64 artifacts/linux/x86_32 artifacts/windows/x86_64 artifacts/windows/x86_32; do
+            normalize_dir "$d"
+          done
+          mkdir -p release-assets
+          stage() {
+            local src="$1"
+            local dest="$2"
+            if [ -f "$src" ]; then
+              cp "$src" "release-assets/${dest}"
+            fi
+          }
+          stage artifacts/linux/x86_64/crash_reporter crash_reporter-linux-x86_64
+          stage artifacts/linux/x86_64/crash_reporter.sig crash_reporter-linux-x86_64.sig
+          stage artifacts/linux/x86_32/crash_reporter crash_reporter-linux-x86_32
+          stage artifacts/linux/x86_32/crash_reporter.sig crash_reporter-linux-x86_32.sig
+          stage artifacts/windows/x86_64/crash_reporter.exe crash_reporter-windows-x86_64.exe
+          stage artifacts/windows/x86_32/crash_reporter.exe crash_reporter-windows-x86_32.exe
+          test -f release-assets/crash_reporter-linux-x86_64
+          test -f release-assets/crash_reporter-windows-x86_64.exe
+          ls -la release-assets/
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(find release-assets -type f | sort)
+          test "${#FILES[@]}" -ge 2
+          NOTES="Blazium Crash Reporter ${VER}
+
+          Sidecar UI for Blazium Engine crash reports. Nothing is uploaded until the user confirms.
+
+          | Platform | Arch | Asset |
+          |----------|------|--------|
+          | Linux | x86_64 | \`crash_reporter-linux-x86_64\` |
+          | Linux | x86_32 | \`crash_reporter-linux-x86_32\` |
+          | Windows | x86_64 | \`crash_reporter-windows-x86_64.exe\` |
+          | Windows | x86_32 | \`crash_reporter-windows-x86_32.exe\` |
+
+          CDN:
+          - Manifest: https://cdn.blazium.app/crash_reporter/crash_reporter.json
+          - Binaries: https://cdn.blazium.app/crash_reporter/{os}/{arch}/${VER}/
+          "
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$TAG" "${FILES[@]}" \
+              --title "Blazium Crash Reporter ${VER}" \
+              --notes "$NOTES" \
+              --target "$GITHUB_SHA" \
+              --latest
+          fi
+          gh release view "$TAG"
