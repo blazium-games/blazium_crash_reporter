@@ -651,7 +651,7 @@ jobs:
           echo "size=$(stat -c%s "$OUT")" >> "$GITHUB_OUTPUT"
           mkdir -p signed
 
-      - uses: bioblaze/sslcom-code-signer@v5
+      - uses: bioblaze/sslcom-code-signer@v6
         name: Windows Signing
         continue-on-error: true
         id: windows_sign
