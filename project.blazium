@@ -3,7 +3,7 @@ config_version=5
 
 [application]
 
-config/name="Blazium Crash Reporter"
+config/name="BlaziumCrashReporter"
 config/description="Official sidecar UI for Blazium utilities (engine, hub, and other first-party tools)."
 config/version="1.0.0"
 run/main_scene="res://scenes/main.tscn"
