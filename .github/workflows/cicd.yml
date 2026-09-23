@@ -41,10 +41,30 @@ jobs:
         working-directory: ci
         run: python -m unittest discover -v
 
-      - name: Download Blazium editor (nightly)
+      - name: Download Blazium editor (nightly on blazium_4.8)
         id: editor
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          ENGINE_OUT="$(python3 ci/resolve_nightly_engine.py --fallback ci/BLAZIUM_REF)"
+          echo "$ENGINE_OUT"
+          SHA="$(printf '%s\n' "$ENGINE_OUT" | sed -n 's/^ref=//p')"
+          test -n "$SHA"
+          STATUS="$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/blazium-games/blazium/compare/${SHA}...blazium_4.8" \
+            | jq -r '.status // empty')"
+          case "$STATUS" in
+            ahead|identical)
+              echo "nightly engine ${SHA} is contained in blazium_4.8"
+              ;;
+            *)
+              echo "nightly engine ${SHA} is not contained in blazium_4.8 (status=${STATUS:-missing})" >&2
+              exit 1
+              ;;
+          esac
           LATEST="$(curl -fsSL https://cdn.blazium.app/catalog/versions/nightly/latest.json)"
           VER="$(printf '%s' "$LATEST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
@@ -92,6 +112,7 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
       blazium_ref: ${{ steps.ref.outputs.ref }}
+      blazium_sha: ${{ steps.ref.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,9 +124,15 @@ jobs:
         with:
           personal_github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve newest nightly engine
+      - name: Resolve blazium_4.8
         id: ref
-        run: python3 ci/resolve_nightly_engine.py --fallback ci/BLAZIUM_REF
+        run: |
+          set -euo pipefail
+          SHA="$(git ls-remote https://github.com/blazium-games/blazium.git refs/heads/blazium_4.8 | awk '{print $1}')"
+          test -n "$SHA"
+          echo "ref=blazium_4.8" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "blazium_4.8 ${SHA}"
 
       - name: Sidecar version
         id: ver
@@ -236,7 +263,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_engine_rebuild }}" == "true" ]]; then
             FORCE="-force-${{ github.run_id }}"
           fi
-          KEY="cr-engine-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}-${{ needs.resolve-engine.outputs.blazium_ref }}-${{ needs.resolve-engine.outputs.version }}-${{ hashFiles('ci/crash_reporter_scons.env') }}-pearch2-id1${FORCE}"
+          KEY="cr-engine-${{ matrix.platform }}-${{ matrix.arch }}-${{ matrix.target }}-blazium_4.8-${{ needs.resolve-engine.outputs.blazium_sha }}-${{ needs.resolve-engine.outputs.version }}-${{ hashFiles('ci/crash_reporter_scons.env') }}-pearch2-id1${FORCE}"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           echo "Binary cache key: $KEY"
 
@@ -252,7 +279,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: blazium-games/blazium
-          ref: ${{ needs.resolve-engine.outputs.blazium_ref }}
+          ref: blazium_4.8
           path: .ci/engine
           submodules: recursive
           fetch-depth: 1
@@ -337,7 +364,7 @@ jobs:
           set +a
           mkdir -p .ci/flags
           printf '%s' "$CR_SCONS_COMMON" > .ci/flags/common.txt
-          printf '%s' "$CR_SCONS_EDITOR editor_build_id=${{ needs.resolve-engine.outputs.blazium_ref }}" > .ci/flags/editor.txt
+          printf '%s' "$CR_SCONS_EDITOR editor_build_id=${{ needs.resolve-engine.outputs.blazium_sha }}" > .ci/flags/editor.txt
           printf '%s' "$CR_SCONS_TEMPLATE template_build_id=${{ needs.resolve-engine.outputs.version }}" > .ci/flags/template.txt
           echo "COMMON: $(cat .ci/flags/common.txt)"
           echo "EDITOR EXTRA: $(cat .ci/flags/editor.txt)"
@@ -484,71 +511,10 @@ jobs:
           echo "### crash_reporter linux ${{ matrix.arch }}" >> "$GITHUB_STEP_SUMMARY"
           du -h "$OUT" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Compute sha256
-        id: digest
-        run: |
-          OUT="build/linux/${{ matrix.arch }}/crash_reporter"
-          echo "sha256=$(sha256sum "$OUT" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "size=$(stat -c%s "$OUT")" >> "$GITHUB_OUTPUT"
-
-      - name: GPG sign
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
-          gpg --batch --yes --output build/linux/${{ matrix.arch }}/crash_reporter.sig \
-            --detach-sign build/linux/${{ matrix.arch }}/crash_reporter
-
       - uses: actions/upload-artifact@v4
         with:
-          name: signed-linux-${{ matrix.arch }}
-          path: |
-            build/linux/${{ matrix.arch }}/crash_reporter
-            build/linux/${{ matrix.arch }}/crash_reporter.sig
-
-      # Unversioned "latest" only. Versioned objects are written by the manifest job.
-      - uses: BetaHuhn/do-spaces-action@v2
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/linux/${{ matrix.arch }}/crash_reporter
-          out_dir: crash_reporter/linux/${{ matrix.arch }}
-
-      - uses: BetaHuhn/do-spaces-action@v2
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: build/linux/${{ matrix.arch }}/crash_reporter.sig
-          out_dir: crash_reporter/linux/${{ matrix.arch }}
-
-      - name: Updating Cerebro
-        env:
-          URL: https://cdn.blazium.app/crash_reporter/linux/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}/crash_reporter
-        run: |
-          curl -s -X POST "${{ secrets.CEREBRO_URL }}/api/v1/tools" \
-          -H "Content-Type: application/json" \
-          -H "BLAZIUM_AUTH: ${{ secrets.BLAZIUM_AUTH }}" \
-          -d "$(cat <<EOF
-          {
-            "name": "Blazium Crash Reporter",
-            "type": "crash_reporter",
-            "version": "${{ needs.resolve-engine.outputs.version }}",
-            "os": "linux",
-            "arch": "${{ matrix.arch }}",
-            "file": "$URL",
-            "sig": "${URL}.sig",
-            "sha256": "${{ steps.digest.outputs.sha256 }}",
-            "size": ${{ steps.digest.outputs.size }},
-            "signing": "gpg",
-            "released_on": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          }
-          EOF
-          )"
+          name: linux-unsigned-${{ matrix.arch }}
+          path: build/linux/${{ matrix.arch }}/crash_reporter
 
   export-windows:
     if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
@@ -614,9 +580,80 @@ jobs:
           name: windows-unsigned-${{ matrix.arch }}
           path: build/windows/${{ matrix.arch }}/crash_reporter.exe
 
+  validate:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine, export-linux, export-windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-unsigned-x86_64
+          path: artifacts/linux/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-unsigned-x86_32
+          path: artifacts/linux/x86_32
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-unsigned-x86_64
+          path: artifacts/windows/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-unsigned-x86_32
+          path: artifacts/windows/x86_32
+      - name: Require every export
+        run: |
+          set -euo pipefail
+          find_bin() {
+            local dir="$1" name="$2"
+            if [ -f "${dir}/${name}" ] || [ -f "${dir}/build/linux/${name}" ] || [ -f "${dir}/build/windows/x86_64/${name}" ] || [ -f "${dir}/build/windows/x86_32/${name}" ]; then
+              return 0
+            fi
+            find "$dir" -type f -name "$name" | grep -q .
+          }
+          find_bin artifacts/linux/x86_64 crash_reporter
+          find_bin artifacts/linux/x86_32 crash_reporter
+          find_bin artifacts/windows/x86_64 crash_reporter.exe
+          find_bin artifacts/windows/x86_32 crash_reporter.exe
+
+  sign-linux:
+    if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+    needs: [resolve-engine, validate]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, x86_32]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-unsigned-${{ matrix.arch }}
+          path: build/linux/${{ matrix.arch }}
+      - name: Flatten and GPG sign
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gnupg
+          if [ ! -f "build/linux/${{ matrix.arch }}/crash_reporter" ]; then
+            FOUND="$(find "build/linux/${{ matrix.arch }}" -type f -name crash_reporter | head -n1)"
+            test -n "$FOUND"
+            cp "$FOUND" "build/linux/${{ matrix.arch }}/crash_reporter"
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --yes --output "build/linux/${{ matrix.arch }}/crash_reporter.sig" \
+            --detach-sign "build/linux/${{ matrix.arch }}/crash_reporter"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-linux-${{ matrix.arch }}
+          path: |
+            build/linux/${{ matrix.arch }}/crash_reporter
+            build/linux/${{ matrix.arch }}/crash_reporter.sig
+
   sign-windows:
     if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
-    needs: [resolve-engine, export-windows]
+    needs: [resolve-engine, validate]
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     strategy:
@@ -671,53 +708,24 @@ jobs:
           echo "sha256=$(sha256sum "$DEST" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "size=$(stat -c%s "$DEST")" >> "$GITHUB_OUTPUT"
 
+      - name: Record Windows signing
+        run: |
+          if [[ "${{ steps.windows_artifact.outputs.signed }}" == "true" ]]; then
+            echo sslcom > signed/signing.txt
+          else
+            echo unsigned > signed/signing.txt
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: signed-windows-${{ matrix.arch }}
-          path: signed/crash_reporter.exe
-
-      # Unversioned "latest" only. Versioned objects are written by the manifest job.
-      - uses: BetaHuhn/do-spaces-action@v2
-        with:
-          access_key: ${{ secrets.DO_ACCESS_KEY }}
-          secret_key: ${{ secrets.DO_SECRET_KEY }}
-          space_name: ${{ secrets.DO_SPACE_NAME }}
-          space_region: ${{ secrets.DO_SPACE_REGION }}
-          source: signed/crash_reporter.exe
-          out_dir: crash_reporter/windows/${{ matrix.arch }}
-
-      - name: Updating Cerebro
-        env:
-          URL: https://cdn.blazium.app/crash_reporter/windows/${{ matrix.arch }}/${{ needs.resolve-engine.outputs.version }}/crash_reporter.exe
-        run: |
-          if [[ "${{ steps.windows_artifact.outputs.signed }}" == "true" ]]; then
-            SIGNING="sslcom"
-          else
-            SIGNING=""
-          fi
-          curl -s -X POST "${{ secrets.CEREBRO_URL }}/api/v1/tools" \
-          -H "Content-Type: application/json" \
-          -H "BLAZIUM_AUTH: ${{ secrets.BLAZIUM_AUTH }}" \
-          -d "$(cat <<EOF
-          {
-            "name": "Blazium Crash Reporter",
-            "type": "crash_reporter",
-            "version": "${{ needs.resolve-engine.outputs.version }}",
-            "os": "windows",
-            "arch": "${{ matrix.arch }}",
-            "file": "$URL",
-            "sig": "",
-            "sha256": "${{ steps.windows_artifact.outputs.sha256 }}",
-            "size": ${{ steps.windows_artifact.outputs.size }},
-            "signing": "$SIGNING",
-            "released_on": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          }
-          EOF
-          )"
+          path: |
+            signed/crash_reporter.exe
+            signed/signing.txt
 
   manifest:
     if: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
-    needs: [resolve-engine, export-linux, sign-windows]
+    needs: [resolve-engine, sign-linux, sign-windows]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -732,7 +740,6 @@ jobs:
           path: artifacts/linux/x86_64
 
       - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: signed-linux-x86_32
           path: artifacts/linux/x86_32
@@ -743,7 +750,6 @@ jobs:
           path: artifacts/windows/x86_64
 
       - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: signed-windows-x86_32
           path: artifacts/windows/x86_32
@@ -777,7 +783,11 @@ jobs:
           fi
           python ci/generate_crash_reporter_manifest.py "${ARGS[@]}"
           test -f artifacts/windows/x86_64/crash_reporter.exe
+          test -f artifacts/windows/x86_32/crash_reporter.exe
           test -f artifacts/linux/x86_64/crash_reporter
+          test -f artifacts/linux/x86_64/crash_reporter.sig
+          test -f artifacts/linux/x86_32/crash_reporter
+          test -f artifacts/linux/x86_32/crash_reporter.sig
 
       # Versioned objects come from the same files hashed into crash_reporter.json.
       - uses: BetaHuhn/do-spaces-action@v2
@@ -799,7 +809,6 @@ jobs:
           out_dir: crash_reporter/linux/x86_64/${{ needs.resolve-engine.outputs.version }}
 
       - uses: BetaHuhn/do-spaces-action@v2
-        continue-on-error: true
         with:
           access_key: ${{ secrets.DO_ACCESS_KEY }}
           secret_key: ${{ secrets.DO_SECRET_KEY }}
@@ -809,7 +818,6 @@ jobs:
           out_dir: crash_reporter/linux/x86_32/${{ needs.resolve-engine.outputs.version }}
 
       - uses: BetaHuhn/do-spaces-action@v2
-        continue-on-error: true
         with:
           access_key: ${{ secrets.DO_ACCESS_KEY }}
           secret_key: ${{ secrets.DO_SECRET_KEY }}
@@ -828,7 +836,6 @@ jobs:
           out_dir: crash_reporter/windows/x86_64/${{ needs.resolve-engine.outputs.version }}
 
       - uses: BetaHuhn/do-spaces-action@v2
-        continue-on-error: true
         with:
           access_key: ${{ secrets.DO_ACCESS_KEY }}
           secret_key: ${{ secrets.DO_SECRET_KEY }}
@@ -836,6 +843,111 @@ jobs:
           space_region: ${{ secrets.DO_SPACE_REGION }}
           source: artifacts/windows/x86_32/crash_reporter.exe
           out_dir: crash_reporter/windows/x86_32/${{ needs.resolve-engine.outputs.version }}
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_64/crash_reporter
+          out_dir: crash_reporter/linux/x86_64
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_64/crash_reporter.sig
+          out_dir: crash_reporter/linux/x86_64
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_32/crash_reporter
+          out_dir: crash_reporter/linux/x86_32
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/linux/x86_32/crash_reporter.sig
+          out_dir: crash_reporter/linux/x86_32
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/windows/x86_64/crash_reporter.exe
+          out_dir: crash_reporter/windows/x86_64
+
+      - uses: BetaHuhn/do-spaces-action@v2
+        with:
+          access_key: ${{ secrets.DO_ACCESS_KEY }}
+          secret_key: ${{ secrets.DO_SECRET_KEY }}
+          space_name: ${{ secrets.DO_SPACE_NAME }}
+          space_region: ${{ secrets.DO_SPACE_REGION }}
+          source: artifacts/windows/x86_32/crash_reporter.exe
+          out_dir: crash_reporter/windows/x86_32
+
+      - name: Register with Cerebro
+        env:
+          VERSION: ${{ needs.resolve-engine.outputs.version }}
+        run: |
+          set -euo pipefail
+          register() {
+            local os="$1" arch="$2" file="$3" signing="$4"
+            local url="https://cdn.blazium.app/crash_reporter/${os}/${arch}/${VERSION}/$(basename "$file")"
+            local sig=""
+            if [[ "$signing" == "gpg" ]]; then
+              sig="${url}.sig"
+            elif [[ "$signing" == "unsigned" ]]; then
+              signing=""
+            fi
+            local sha size
+            sha=$(sha256sum "$file" | awk '{print $1}')
+            size=$(stat -c%s "$file")
+            curl -fsS -X POST "${{ secrets.CEREBRO_URL }}/api/v1/tools" \
+              -H "Content-Type: application/json" \
+              -H "BLAZIUM_AUTH: ${{ secrets.BLAZIUM_AUTH }}" \
+              -d "$(cat <<EOF
+          {
+            "name": "Blazium Crash Reporter",
+            "type": "crash_reporter",
+            "version": "${VERSION}",
+            "os": "${os}",
+            "arch": "${arch}",
+            "file": "${url}",
+            "sig": "${sig}",
+            "sha256": "${sha}",
+            "size": ${size},
+            "signing": "${signing}",
+            "released_on": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          )"
+          }
+          win_signing() {
+            local arch="$1"
+            local marker="artifacts/windows/${arch}/signing.txt"
+            if [[ -f "$marker" && "$(tr -d '[:space:]' < "$marker")" == "sslcom" ]]; then
+              echo sslcom
+            else
+              echo unsigned
+            fi
+          }
+          register linux x86_64 artifacts/linux/x86_64/crash_reporter gpg
+          register linux x86_32 artifacts/linux/x86_32/crash_reporter gpg
+          register windows x86_64 artifacts/windows/x86_64/crash_reporter.exe "$(win_signing x86_64)"
+          register windows x86_32 artifacts/windows/x86_32/crash_reporter.exe "$(win_signing x86_32)"
 
       - uses: BetaHuhn/do-spaces-action@v2
         with:
@@ -883,7 +995,6 @@ jobs:
           path: artifacts/linux/x86_64
 
       - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: signed-linux-x86_32
           path: artifacts/linux/x86_32
@@ -894,7 +1005,6 @@ jobs:
           path: artifacts/windows/x86_64
 
       - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: signed-windows-x86_32
           path: artifacts/windows/x86_32
@@ -928,7 +1038,11 @@ jobs:
           stage artifacts/windows/x86_64/crash_reporter.exe crash_reporter-windows-x86_64.exe
           stage artifacts/windows/x86_32/crash_reporter.exe crash_reporter-windows-x86_32.exe
           test -f release-assets/crash_reporter-linux-x86_64
+          test -f release-assets/crash_reporter-linux-x86_64.sig
+          test -f release-assets/crash_reporter-linux-x86_32
+          test -f release-assets/crash_reporter-linux-x86_32.sig
           test -f release-assets/crash_reporter-windows-x86_64.exe
+          test -f release-assets/crash_reporter-windows-x86_32.exe
           ls -la release-assets/
 
       - name: Create or update GitHub Release
